@@ -716,6 +716,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
               DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DONOTROUND;
               ::DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
 
+              // Disable DWM frame extension to remove shadow
+              MARGINS margins = {0, 0, 0, 0};
+              ::DwmExtendFrameIntoClientArea(hwnd, &margins);
+
               // Register for frameless tracking
               g_flutter_frameless_windows[hwnd] = true;
 
@@ -828,8 +832,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
               DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DONOTROUND;
               ::DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
 
-              // Use sheet of glass technique to prevent flicker during activation
-              MARGINS margins = {0, 0, 1, 0};  // 1px top margin extends DWM into title bar area
+              // Disable DWM frame extension to remove shadow  
+              MARGINS margins = {0, 0, 0, 0};  // Zero margins remove shadow
               ::DwmExtendFrameIntoClientArea(hwnd, &margins);
 
               // Register for frameless tracking
