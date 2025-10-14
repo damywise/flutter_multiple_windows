@@ -19,6 +19,12 @@
 
 #pragma comment(lib, "dwmapi.lib")
 
+// Custom window message for deferred window processing
+#define WM_FLUTTER_WINDOW_CREATED (WM_APP + 1)
+
+// Timer ID for delayed window setup
+#define TIMER_AUTOSETUP_WINDOW 1001
+
 // ============================================================================
 // WINDOWS COMPOSITION ATTRIBUTE STRUCTURES FOR TRANSPARENCY
 // ============================================================================
@@ -110,6 +116,19 @@ std::map<HWND, bool> g_flutter_transparent_windows;
 
 // Global function pointer for SetWindowCompositionAttribute
 SetWindowCompositionAttribute g_set_window_composition_attribute = nullptr;
+
+// Global CBT hook handle for intercepting window creation
+HHOOK g_cbt_hook = nullptr;
+
+// Message-only window for async processing
+HWND g_message_window = nullptr;
+
+// Map of windows pending auto-setup with their timer IDs
+std::map<UINT_PTR, HWND> g_pending_autosetup_windows;
+UINT_PTR g_next_timer_id = TIMER_AUTOSETUP_WINDOW;
+
+// Forward declaration
+bool AutoSetupFlutterWindow(HWND hwnd);
 
 /**
  * Adjust NCCALCSIZE parameters for maximized frameless windows.
@@ -356,6 +375,177 @@ std::vector<HWND> GetAllWindowHandles() {
   return handles;
 }
 
+
+/**
+ * Automatically set up a Flutter window with frameless and transparency.
+ * This function applies all necessary window modifications for a Flutter window.
+ */
+bool AutoSetupFlutterWindow(HWND hwnd) {
+  std::cout << "[AUTOSETUP] Starting auto-setup for window: 0x" << std::hex << hwnd << std::dec << std::endl;
+  
+  // Setup window interception
+  if (!setupWindowInterception(hwnd)) {
+    std::cerr << "[AUTOSETUP] Failed to setup window interception" << std::endl;
+    return false;
+  }
+  std::cout << "[AUTOSETUP] Window interception setup complete" << std::endl;
+  
+  // Make frameless
+  LONG_PTR style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
+  std::cout << "[AUTOSETUP] Original style: 0x" << std::hex << style << std::dec << std::endl;
+  
+  style &= ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX |
+            WS_BORDER | WS_DLGFRAME | WS_SIZEBOX);
+  style |= WS_THICKFRAME;
+  ::SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+  std::cout << "[AUTOSETUP] Applied frameless style: 0x" << std::hex << style << std::dec << std::endl;
+  
+  LONG_PTR exStyle = ::GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  exStyle &= ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME |
+              WS_EX_STATICEDGE | WS_EX_TOOLWINDOW | WS_EX_APPWINDOW);
+  ::SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+  std::cout << "[AUTOSETUP] Applied extended style" << std::endl;
+  
+  DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DONOTROUND;
+  ::DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
+  std::cout << "[AUTOSETUP] Set corner preference" << std::endl;
+
+  // Explicitly disable shadows
+  DWMNCRENDERINGPOLICY policy = DWMNCRP_DISABLED;
+  ::DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+  std::cout << "[AUTOSETUP] Disabled NC rendering (removes shadow)" << std::endl;
+
+  MARGINS margins = {0, 0, 0, 0};
+  ::DwmExtendFrameIntoClientArea(hwnd, &margins);
+  std::cout << "[AUTOSETUP] Extended DWM frame for frameless" << std::endl;
+  
+  g_flutter_frameless_windows[hwnd] = true;
+  
+  // Make transparent (if function available)
+  if (g_set_window_composition_attribute) {
+    std::cout << "[AUTOSETUP] Applying transparency..." << std::endl;
+    
+    // Don't change margins - keep {0,0,0,0} for shadow removal
+    // Transparency works fine without extending DWM frame
+    
+    ACCENT_POLICY accent = {
+      ACCENT_ENABLE_TRANSPARENTGRADIENT,
+      2,
+      0x00000000,
+      0
+    };
+    
+    WINDOWCOMPOSITIONATTRIBDATA data;
+    data.Attrib = WCA_ACCENT_POLICY;
+    data.pvData = &accent;
+    data.cbData = sizeof(accent);
+    
+    if (g_set_window_composition_attribute(hwnd, &data)) {
+      g_flutter_transparent_windows[hwnd] = true;
+      std::cout << "[AUTOSETUP] Transparency applied successfully" << std::endl;
+    } else {
+      std::cerr << "[AUTOSETUP] Failed to apply transparency" << std::endl;
+    }
+  } else {
+    std::cerr << "[AUTOSETUP] SetWindowCompositionAttribute not available" << std::endl;
+  }
+  
+  // Force redraw
+  RECT rect;
+  ::GetWindowRect(hwnd, &rect);
+  ::SetWindowPos(hwnd, nullptr, rect.left, rect.top,
+               rect.right - rect.left, rect.bottom - rect.top,
+               SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+  std::cout << "[AUTOSETUP] Force redraw complete" << std::endl;
+  
+  std::cout << "[AUTOSETUP] Auto-setup complete for window: 0x" << std::hex << hwnd << std::dec << std::endl;
+  return true;
+}
+
+/**
+ * Message window procedure for async window processing.
+ * Handles WM_FLUTTER_WINDOW_CREATED messages posted by the CBT hook.
+ */
+LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  if (msg == WM_FLUTTER_WINDOW_CREATED) {
+    HWND created_hwnd = reinterpret_cast<HWND>(wParam);
+    
+    if (::IsWindow(created_hwnd)) {
+      wchar_t className[256] = {0};
+      if (::GetClassNameW(created_hwnd, className, sizeof(className) / sizeof(wchar_t))) {
+        std::wstring classStr(className);
+        
+        // Only process FLUTTER_HOST_WINDOW (the actual window, not FLUTTERVIEW)
+        if (classStr == L"FLUTTER_HOST_WINDOW") {
+          std::cout << "[CBT] FLUTTER_HOST_WINDOW detected: 0x" << std::hex << created_hwnd << std::dec << std::endl;
+          
+          // Set timer for delayed auto-setup (200ms delay)
+          UINT_PTR timer_id = g_next_timer_id++;
+          g_pending_autosetup_windows[timer_id] = created_hwnd;
+          
+          // Use message window handle instead of nullptr to preserve timer ID
+          if (SetTimer(g_message_window, timer_id, 100, nullptr)) {
+            std::cout << "[CBT] Scheduled delayed auto-setup (200ms) for window: 0x" << std::hex << created_hwnd 
+                      << std::dec << " with timer ID: " << timer_id << std::endl;
+          } else {
+            std::cerr << "[CBT] Failed to schedule delayed auto-setup" << std::endl;
+            g_pending_autosetup_windows.erase(timer_id);
+          }
+        }
+      }
+    }
+    return 0;
+  }
+  
+  if (msg == WM_TIMER) {
+    UINT_PTR timer_id = wParam;
+    std::cout << "[TIMER] Timer message received for ID: " << timer_id << std::endl;
+    
+    auto it = g_pending_autosetup_windows.find(timer_id);
+    if (it != g_pending_autosetup_windows.end()) {
+      HWND target_hwnd = it->second;
+      std::cout << "[TIMER] Found window: 0x" << std::hex << target_hwnd << std::dec << std::endl;
+      
+      if (::IsWindow(target_hwnd)) {
+        std::cout << "[TIMER] Window is valid, applying auto-setup..." << std::endl;
+        
+        if (AutoSetupFlutterWindow(target_hwnd)) {
+          std::cout << "[TIMER] ✓ Auto-setup SUCCESS" << std::endl;
+        } else {
+          std::cerr << "[TIMER] ✗ Auto-setup FAILED" << std::endl;
+        }
+      } else {
+        std::cout << "[TIMER] Window no longer exists" << std::endl;
+      }
+      
+      g_pending_autosetup_windows.erase(it);
+      KillTimer(hwnd, timer_id);
+    } else {
+      std::cout << "[TIMER] Timer ID not found in pending windows" << std::endl;
+    }
+    return 0;
+  }
+  
+  return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+/**
+ * CBT Hook callback for intercepting window creation.
+ * This catches windows at the earliest possible stage (WM_NCCREATE).
+ */
+LRESULT CALLBACK CBTProc(int nCode, WPARAM wParam, LPARAM lParam) {
+  if (nCode == HCBT_CREATEWND) {
+    // HWND hwnd = reinterpret_cast<HWND>(wParam);
+    
+    // Post message for async processing - returns immediately, no blocking
+    if (g_message_window) {
+      PostMessage(g_message_window, WM_FLUTTER_WINDOW_CREATED, wParam, 0);
+    }
+  }
+  
+  return CallNextHookEx(g_cbt_hook, nCode, wParam, lParam);
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t* command_line, _In_ int show_command) {
   // Attach to console when present (e.g., 'flutter run') or create a
@@ -390,6 +580,29 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     }
   } else {
     std::cerr << "Failed to get user32.dll handle" << std::endl;
+  }
+
+  // Create message-only window for async processing
+  WNDCLASS wc = {0};
+  wc.lpfnWndProc = MessageWindowProc;
+  wc.hInstance = instance;
+  wc.lpszClassName = L"FlutterWindowDetectorMessageWindow";
+  RegisterClass(&wc);
+
+  g_message_window = CreateWindowEx(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, 
+                                   HWND_MESSAGE, NULL, instance, NULL);
+  if (g_message_window) {
+    std::cout << "Message window created for async processing" << std::endl;
+  } else {
+    std::cerr << "Failed to create message window" << std::endl;
+  }
+
+  // Install CBT hook for automatic window creation interception
+  g_cbt_hook = SetWindowsHookEx(WH_CBT, CBTProc, NULL, GetCurrentThreadId());
+  if (g_cbt_hook) {
+    std::cout << "CBT hook installed successfully for window creation tracking" << std::endl;
+  } else {
+    std::cerr << "Failed to install CBT hook: " << GetLastError() << std::endl;
   }
 
   // ============================================================================
@@ -668,6 +881,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
             // Check current window style to determine if it's frameless
             LONG_PTR current_style = ::GetWindowLongPtrW(hwnd, GWL_STYLE);
             bool is_frameless = (current_style & WS_CAPTION) == 0;
+            std::cout << "[TOGGLE] Current frameless state detected: " << (is_frameless ? "YES" : "NO") << std::endl;
 
             // Toggle: if frameless -> make normal, if normal -> make frameless
             if (is_frameless) {
@@ -687,6 +901,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
               // Restore default corner preference for normal windows
               DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DEFAULT;
               ::DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
+
+              // Reset NC rendering policy to enable shadows
+              DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+              ::DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
 
               // Reset DWM frame to normal
               MARGINS margins = {0, 0, 0, 0};
@@ -857,6 +1075,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
               // Restore default corner preference for normal windows
               DWM_WINDOW_CORNER_PREFERENCE cornerPref = DWMWCP_DEFAULT;
               ::DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPref, sizeof(cornerPref));
+
+              // Reset NC rendering policy to enable shadows
+              DWMNCRENDERINGPOLICY policy = DWMNCRP_ENABLED;
+              ::DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
 
               // Reset DWM frame to normal
               MARGINS margins = {0, 0, 0, 0};
@@ -1283,6 +1505,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
             // Check if transparency is already in the desired state
             auto transparentIt = g_flutter_transparent_windows.find(hwnd);
             bool currentlyTransparent = (transparentIt != g_flutter_transparent_windows.end() && transparentIt->second);
+            std::cout << "[TOGGLE] Current transparent state: " << (currentlyTransparent ? "YES" : "NO") 
+                      << ", Requested: " << (transparent ? "YES" : "NO") << std::endl;
 
             if (transparent == currentlyTransparent) {
               // Already in desired state, no need to do anything
@@ -1407,6 +1631,17 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
           }
         }
 
+        // ========================================================================
+        // isWindowCreationHookActive: Check if CBT hook is active
+        // ========================================================================
+        // Returns true if the window creation interception hook is active.
+        // Useful for debugging and verifying the hook is working.
+        // ========================================================================
+        if (method == "isWindowCreationHookActive") {
+          result->Success(flutter::EncodableValue(g_cbt_hook != nullptr));
+          return;
+        }
+
         result->NotImplemented();
       });
 
@@ -1440,6 +1675,24 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Clear the tracking maps
   g_flutter_hidden_title_bar_windows.clear();
   g_original_window_procedures.clear();
+
+  // Kill any pending auto-setup timers
+  for (const auto& pair : g_pending_autosetup_windows) {
+    KillTimer(g_message_window, pair.first);
+  }
+  g_pending_autosetup_windows.clear();
+
+  // Destroy message window
+  if (g_message_window) {
+    DestroyWindow(g_message_window);
+    g_message_window = nullptr;
+  }
+
+  // Unhook CBT hook
+  if (g_cbt_hook) {
+    UnhookWindowsHookEx(g_cbt_hook);
+    std::cout << "CBT hook uninstalled" << std::endl;
+  }
 
   ::CoUninitialize();
   return EXIT_SUCCESS;
