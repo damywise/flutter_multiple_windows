@@ -11,6 +11,7 @@
 #include <vector>
 #include <dwmapi.h>
 #include <map>
+#include <algorithm>
 
 #include "utils.h"
 
@@ -568,6 +569,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   RegisterPlugins(engine.get());
   engine->Run();
 
+  // Set to true to skip automatic window setup (message window, CBT hook, timers)
+  bool skip_autosetup = true;
+  
+  if (skip_autosetup) {
+    std::cout << "Auto-setup disabled — skipping window auto-setup and hooks" << std::endl;
+  }
+
   // Load SetWindowCompositionAttribute function for transparency support
   HMODULE user32 = ::GetModuleHandleA("user32.dll");
   if (user32) {
@@ -582,27 +590,30 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     std::cerr << "Failed to get user32.dll handle" << std::endl;
   }
 
-  // Create message-only window for async processing
-  WNDCLASS wc = {0};
-  wc.lpfnWndProc = MessageWindowProc;
-  wc.hInstance = instance;
-  wc.lpszClassName = L"FlutterWindowDetectorMessageWindow";
-  RegisterClass(&wc);
+  // Create message-only window for async processing and install CBT hook
+  // unless NO_AUTOSETUP is set.
+  if (!skip_autosetup) {
+    WNDCLASS wc = {0};
+    wc.lpfnWndProc = MessageWindowProc;
+    wc.hInstance = instance;
+    wc.lpszClassName = L"FlutterWindowDetectorMessageWindow";
+    RegisterClass(&wc);
 
-  g_message_window = CreateWindowEx(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, 
-                                   HWND_MESSAGE, NULL, instance, NULL);
-  if (g_message_window) {
-    std::cout << "Message window created for async processing" << std::endl;
-  } else {
-    std::cerr << "Failed to create message window" << std::endl;
-  }
+    g_message_window = CreateWindowEx(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, 
+                                     HWND_MESSAGE, NULL, instance, NULL);
+    if (g_message_window) {
+      std::cout << "Message window created for async processing" << std::endl;
+    } else {
+      std::cerr << "Failed to create message window" << std::endl;
+    }
 
-  // Install CBT hook for automatic window creation interception
-  g_cbt_hook = SetWindowsHookEx(WH_CBT, CBTProc, NULL, GetCurrentThreadId());
-  if (g_cbt_hook) {
-    std::cout << "CBT hook installed successfully for window creation tracking" << std::endl;
-  } else {
-    std::cerr << "Failed to install CBT hook: " << GetLastError() << std::endl;
+    // Install CBT hook for automatic window creation interception
+    g_cbt_hook = SetWindowsHookEx(WH_CBT, CBTProc, NULL, GetCurrentThreadId());
+    if (g_cbt_hook) {
+      std::cout << "CBT hook installed successfully for window creation tracking" << std::endl;
+    } else {
+      std::cerr << "Failed to install CBT hook: " << GetLastError() << std::endl;
+    }
   }
 
   // ============================================================================
@@ -1676,19 +1687,21 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   g_flutter_hidden_title_bar_windows.clear();
   g_original_window_procedures.clear();
 
-  // Kill any pending auto-setup timers
-  for (const auto& pair : g_pending_autosetup_windows) {
-    KillTimer(g_message_window, pair.first);
+  // Kill any pending auto-setup timers (only if a message window was created).
+  if (g_message_window) {
+    for (const auto& pair : g_pending_autosetup_windows) {
+      KillTimer(g_message_window, pair.first);
+    }
   }
   g_pending_autosetup_windows.clear();
 
-  // Destroy message window
+  // Destroy message window (only if we created one)
   if (g_message_window) {
     DestroyWindow(g_message_window);
     g_message_window = nullptr;
   }
 
-  // Unhook CBT hook
+  // Unhook CBT hook (only if we installed one)
   if (g_cbt_hook) {
     UnhookWindowsHookEx(g_cbt_hook);
     std::cout << "CBT hook uninstalled" << std::endl;
