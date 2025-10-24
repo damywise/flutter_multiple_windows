@@ -14,6 +14,8 @@ import 'dart:math';
 import 'package:flutter/src/widgets/_window.dart';
 import 'window_controls_widget.dart';
 
+import 'shared_state.dart';
+
 class RegularWindowContent extends StatelessWidget {
   RegularWindowContent({super.key, required this.window})
     : cubeColor = _generateRandomDarkColor();
@@ -41,49 +43,83 @@ class RegularWindowContent extends StatelessWidget {
     final child = Scaffold(
       appBar: AppBar(title: Text('Regular Window')),
       backgroundColor: Colors.transparent,
-      body: Center(
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Column(
+      body: Column(
+        children: [
+          // Shared Counter Widget
+          Container(
+            padding: const EdgeInsets.all(8),
+            color: Theme.of(context).colorScheme.secondaryContainer,
+            child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
-              children: [RotatedWireCube(cubeColor: cubeColor)],
-            ),
-            Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                ElevatedButton(
-                  onPressed: () {
-                    final UniqueKey key = UniqueKey();
-                    windowManager.add(
-                      KeyedWindow(
-                        key: key,
-                        controller: RegularWindowController(
-                          preferredSize: windowSettings.regularSize,
-                          delegate: CallbackRegularWindowControllerDelegate(
-                            onDestroyed: () => windowManager.remove(key),
-                          ),
-                          title: 'Regular',
-                        ),
-                      ),
-                    );
+                const Text('Shared Counter: ', style: TextStyle(fontWeight: FontWeight.bold)),
+                ValueListenableBuilder<int>(
+                  valueListenable: sharedCounter,
+                  builder: (context, value, child) {
+                    return Text('$value', style: const TextStyle(fontSize: 18));
                   },
-                  child: const Text('Create Regular Window'),
                 ),
-                const SizedBox(height: 20),
-                const ConstrainedWindowControlsWidget(),
-                const SizedBox(height: 20),
-                Text(
-                  'View #${window.rootView.viewId}\n'
-                  'Size: ${(windowSize.width).toStringAsFixed(1)}\u00D7${(windowSize.height).toStringAsFixed(1)}\n'
-                  'Device Pixel Ratio: $dpr',
-                  textAlign: TextAlign.center,
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: SharedState.incrementCounter,
+                  child: const Text('+'),
+                ),
+                const SizedBox(width: 4),
+                ElevatedButton(
+                  onPressed: SharedState.decrementCounter,
+                  child: const Text('-'),
                 ),
               ],
             ),
-          ],
-        ),
+          ),
+          // Main content
+          Expanded(
+            child: Center(
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [RotatedWireCube(cubeColor: cubeColor)],
+                  ),
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      ElevatedButton(
+                        onPressed: () {
+                          final UniqueKey key = UniqueKey();
+                          windowManager.add(
+                            KeyedWindow(
+                              key: key,
+                              controller: RegularWindowController(
+                                preferredSize: windowSettings.regularSize,
+                                delegate: CallbackRegularWindowControllerDelegate(
+                                  onDestroyed: () => windowManager.remove(key),
+                                ),
+                                title: 'Regular',
+                              ),
+                            ),
+                          );
+                        },
+                        child: const Text('Create Regular Window'),
+                      ),
+                      const SizedBox(height: 20),
+                      const ConstrainedWindowControlsWidget(),
+                      const SizedBox(height: 20),
+                      Text(
+                        'View #${window.rootView.viewId}\n'
+                        'Size: ${(windowSize.width).toStringAsFixed(1)}\u00D7${(windowSize.height).toStringAsFixed(1)}\n'
+                        'Device Pixel Ratio: $dpr',
+                        textAlign: TextAlign.center,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
 

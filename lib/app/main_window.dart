@@ -8,6 +8,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/src/widgets/_window.dart';
 
+import 'shared_state.dart';
 import 'regular_window_content.dart';
 import 'window_settings_dialog.dart';
 import 'models.dart';
@@ -23,28 +24,73 @@ class MainWindow extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(title: const Text('Multi Window Reference App')),
       backgroundColor: Colors.transparent,
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      body: Column(
         children: [
-          Expanded(
-            flex: 60,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
+          // Shared Counter Widget
+          Container(
+            padding: const EdgeInsets.all(16),
+            color: Theme.of(context).colorScheme.primaryContainer,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.vertical,
-                    child: _WindowsTable(),
-                  ),
+                const Text(
+                  'Shared Counter: ',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                ValueListenableBuilder<int>(
+                  valueListenable: sharedCounter,
+                  builder: (context, value, child) {
+                    return Text(
+                      '$value',
+                      style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                    );
+                  },
+                ),
+                const SizedBox(width: 16),
+                ElevatedButton(
+                  onPressed: SharedState.incrementCounter,
+                  child: const Text('+'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: SharedState.decrementCounter,
+                  child: const Text('-'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: SharedState.resetCounter,
+                  child: const Text('Reset'),
                 ),
               ],
             ),
           ),
+          // Main content
           Expanded(
-            flex: 40,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [Expanded(child: _WindowCreatorCard())],
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 60,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: SingleChildScrollView(
+                          scrollDirection: Axis.vertical,
+                          child: _WindowsTable(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  flex: 40,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [Expanded(child: _WindowCreatorCard())],
+                  ),
+                ),
+              ],
             ),
           ),
         ],
